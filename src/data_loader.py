@@ -5,20 +5,89 @@ from datetime import datetime, timedelta
 import time
 
 class CleanEnergyDataLoader:
-    """Download and prepare clean energy stock data"""
+    """Download and prepare stock data for multiple categories (SDG + Non-SDG)"""
     
-    def __init__(self, tickers=['ICLN', 'TAN', 'ENPH', 'FSLR']):
-        self.tickers = tickers
+    # Predefined ticker categories
+    TICKER_CATEGORIES = {
+        'SDG_CLEAN_ENERGY': {
+            'tickers': ['ICLN', 'TAN', 'ENPH', 'FSLR'],
+            'description': 'Clean Energy (SDG #7)',
+            'sdg_aligned': True
+        },
+        'SDG_HEALTH': {
+            'tickers': ['JNJ', 'PFE', 'UNH', 'ABBV'],
+            'description': 'Healthcare (SDG #3)',
+            'sdg_aligned': True
+        },
+        'TECH': {
+            'tickers': ['AAPL', 'MSFT', 'GOOGL', 'NVDA'],
+            'description': 'Technology',
+            'sdg_aligned': False
+        },
+        'FINANCE': {
+            'tickers': ['JPM', 'BAC', 'GS', 'MS'],
+            'description': 'Financial Services',
+            'sdg_aligned': False
+        },
+        'CONSUMER': {
+            'tickers': ['AMZN', 'WMT', 'HD', 'NKE'],
+            'description': 'Consumer & Retail',
+            'sdg_aligned': False
+        },
+        'ENERGY_TRADITIONAL': {
+            'tickers': ['XOM', 'CVX', 'COP', 'SLB'],
+            'description': 'Traditional Energy',
+            'sdg_aligned': False
+        }
+    }
+    
+    def __init__(self, category='SDG_CLEAN_ENERGY', custom_tickers=None):
+        """
+        Initialize with category or custom tickers
+        
+        Args:
+            category: One of the predefined categories or 'CUSTOM'
+            custom_tickers: List of custom ticker symbols (if category='CUSTOM')
+        """
+        if custom_tickers:
+            self.tickers = custom_tickers
+            self.category = 'CUSTOM'
+            self.description = 'Custom Selection'
+            self.sdg_aligned = False
+        elif category in self.TICKER_CATEGORIES:
+            cat_info = self.TICKER_CATEGORIES[category]
+            self.tickers = cat_info['tickers']
+            self.category = category
+            self.description = cat_info['description']
+            self.sdg_aligned = cat_info['sdg_aligned']
+        else:
+            raise ValueError(f"Unknown category: {category}. Choose from {list(self.TICKER_CATEGORIES.keys())} or use custom_tickers")
+        
         self.raw_data = None
         self.processed_data = None
         
-    def download_data(self, period='3y', interval='1d', max_retries=3):
+        print(f"Initialized: {self.description}")
+        print(f"Tickers: {self.tickers}")
+        print(f"SDG Aligned: {'Yes' if self.sdg_aligned else 'No'}")
+    
+    @classmethod
+    def list_categories(cls):
+        """Print all available categories"""
+        print("\n" + "="*70)
+        print("AVAILABLE TICKER CATEGORIES")
+        print("="*70)
+        for cat, info in cls.TICKER_CATEGORIES.items():
+            sdg = "✓ SDG" if info['sdg_aligned'] else "  ---"
+            print(f"{sdg} | {cat:20s} | {info['description']}")
+            print(f"      Tickers: {', '.join(info['tickers'])}")
+        print("="*70 + "\n")
+    
+    def download_data(self, period='2y', interval='1d', max_retries=3):
         """Download latest data from Yahoo Finance with retry logic"""
-        print(f"Downloading {period} of data for {self.tickers}...")
+        print(f"\nDownloading {period} of data for {self.category}...")
         
         for attempt in range(max_retries):
             try:
-                # Try downloading all tickers at once
                 data = yf.download(
                     self.tickers, 
                     period=period, 
@@ -37,15 +106,14 @@ class CleanEnergyDataLoader:
             except Exception as e:
                 print(f"Attempt {attempt + 1} failed: {e}")
                 if attempt < max_retries - 1:
-                    wait_time = 2 ** attempt  # Exponential backoff
+                    wait_time = 2 ** attempt
                     print(f"Waiting {wait_time}s before retry...")
                     time.sleep(wait_time)
         
-        # If all retries fail, try downloading individually
         print("\nTrying individual ticker downloads...")
         return self._download_individually(period, interval)
     
-    def _download_individually(self, period='1mo', interval='1d'):
+    def _download_individually(self, period='2y', interval='1d'):
         """Download each ticker separately as fallback"""
         all_data = {}
         
@@ -66,16 +134,15 @@ class CleanEnergyDataLoader:
                 else:
                     print("✗ No data")
                     
-                time.sleep(0.5)  # Rate limiting
+                time.sleep(0.5)
                 
             except Exception as e:
                 print(f"✗ Error: {e}")
                 continue
         
         if not all_data:
-            raise ValueError("Failed to download data for any ticker. Please check your internet connection.")
+            raise ValueError("Failed to download data for any ticker. Check internet connection.")
         
-        # Combine into multi-index DataFrame
         combined = pd.concat(all_data, axis=1)
         combined.columns.names = ['Ticker', 'Price']
         
@@ -89,16 +156,13 @@ class CleanEnergyDataLoader:
             raise ValueError("No data downloaded. Call download_data() first.")
         
         try:
-            # Handle multi-level columns
             if isinstance(self.raw_data.columns, pd.MultiIndex):
                 df = self.raw_data[ticker].copy()
             else:
-                # Handle flat columns with ticker prefix
                 cols = [col for col in self.raw_data.columns if ticker in str(col)]
                 df = self.raw_data[cols].copy()
                 df.columns = [col.split('_')[0] if '_' in str(col) else col for col in df.columns]
             
-            # Ensure standard column names
             if 'Close' not in df.columns and 'Adj Close' in df.columns:
                 df['Close'] = df['Adj Close']
             
@@ -126,3 +190,22 @@ class CleanEnergyDataLoader:
         combined = pd.concat(all_features, axis=1)
         combined = combined.dropna()
         return combined
+    
+    def get_sdg_info(self):
+        """Get SDG alignment information"""
+        if self.sdg_aligned:
+            sdg_mapping = {
+                'SDG_CLEAN_ENERGY': {
+                    'sdg_number': 7,
+                    'sdg_name': 'Affordable and Clean Energy',
+                    'impact': 'Supports renewable energy investment and clean energy transition'
+                },
+                'SDG_HEALTH': {
+                    'sdg_number': 3,
+                    'sdg_name': 'Good Health and Well-being',
+                    'impact': 'Promotes healthcare access and pharmaceutical innovation'
+                }
+            }
+            return sdg_mapping.get(self.category, {})
+        else:
+            return {'sdg_aligned': False}
