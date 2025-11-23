@@ -24,7 +24,7 @@ def main():
     # 1. DATA LOADING
     print("\n[1/6] Loading Data...")
     loader = CleanEnergyDataLoader(tickers=['ICLN', 'TAN', 'ENPH', 'FSLR'])
-    raw_data = loader.download_data(period='2y', interval='1d')
+    raw_data = loader.download_data(period='3y', interval='1d')
     
     # 2. FEATURE ENGINEERING
     print("\n[2/6] Engineering Features...")
