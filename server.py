@@ -16,12 +16,11 @@ import seaborn as sns
 import io
 import base64
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+# Import from main.py instead of duplicating logic
+sys.path.insert(0, os.path.dirname(__file__))
 warnings.filterwarnings('ignore')
 
-from data_loader import CleanEnergyDataLoader
-from feature_engineering import FeatureEngineer
-from model_training import XGBoostMarketClassifier
+from main import train_and_predict
 
 app = Flask(__name__)
 CORS(app)
@@ -39,75 +38,6 @@ CATEGORIES = {
     'ENERGY_TRADITIONAL': ['XOM', 'CVX', 'COP', 'SLB']
 }
 
-def run_main_pipeline(tickers, category='CUSTOM'):
-    """Runs the EXISTING main.py pipeline logic"""
-    try:
-        if category == 'CUSTOM':
-            loader = CleanEnergyDataLoader(category='CUSTOM', custom_tickers=tickers)
-        else:
-            loader = CleanEnergyDataLoader(category=category)
-        
-        raw_data = loader.download_data(period='2y', interval='1d')
-        
-        if raw_data.empty or len(raw_data) < 50:
-            return None
-        
-        engineer = FeatureEngineer()
-        all_ticker_features = []
-        
-        for ticker in loader.tickers:
-            try:
-                ticker_df = loader.get_ticker_data(ticker)
-                if ticker_df.empty or len(ticker_df) < 50:
-                    continue
-                ticker_df = engineer.create_all_features(ticker_df, ticker_prefix='')
-                ticker_df.columns = [f"{ticker}_{col}" for col in ticker_df.columns]
-                all_ticker_features.append(ticker_df)
-            except Exception as e:
-                continue
-        
-        if not all_ticker_features:
-            return None
-        
-        combined_df = pd.concat(all_ticker_features, axis=1)
-        combined_df = combined_df.dropna()
-        
-        if len(combined_df) < 50:
-            return None
-        
-        primary_ticker = loader.tickers[0]
-        combined_df = engineer.create_target_label(combined_df, target_ticker=primary_ticker, forward_days=1)
-        
-        classifier = XGBoostMarketClassifier(random_state=42)
-        X_train, X_test, y_train, y_test = classifier.prepare_data(combined_df)
-        classifier.train(X_train, y_train)
-        
-        metrics = classifier.evaluate(X_train, X_test, y_train, y_test)
-        
-        latest_features = combined_df.drop(columns=['target', 'future_close']).iloc[[-1]]
-        next_day_pred = classifier.predict_next_day(latest_features)
-        
-        return {
-            'classifier': classifier,
-            'loader': loader,
-            'combined_df': combined_df,
-            'primary_ticker': primary_ticker,
-            'metrics': metrics,
-            'prediction': next_day_pred,
-            'tickers': loader.tickers,
-            'X_train': X_train,
-            'X_test': X_test,
-            'y_train': y_train,
-            'y_test': y_test,
-            'raw_data': raw_data
-        }
-        
-    except Exception as e:
-        print(f"Pipeline error: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
 def get_current_price(ticker):
     """Get current price for ticker"""
     try:
@@ -120,6 +50,17 @@ def get_current_price(ticker):
         pass
     return None
 
+def get_currency_symbol(ticker):
+    """Determine currency symbol based on ticker exchange"""
+    if ticker.endswith('.NS') or ticker.endswith('.BO'):
+        return '₹'  # Indian Rupee
+    elif ticker.endswith('.L') or ticker.endswith('.TO'):
+        return '£'  # British Pound (for LSE) or could be CAD for TSX
+    elif ticker.endswith('.T') or ticker.endswith('.HK'):
+        return '¥'  # Japanese Yen or Hong Kong Dollar
+    else:
+        return '$'  # Default to USD
+
 def get_or_create_model(tickers):
     """Get cached model or run main.py pipeline to create new one"""
     ticker_key = ','.join(sorted(tickers))
@@ -131,7 +72,8 @@ def get_or_create_model(tickers):
                 return models_cache[ticker_key]
         
         print(f"Running main pipeline for: {ticker_key}")
-        result = run_main_pipeline(tickers)
+        # Use the clean function from main.py - trains separate model for each ticker
+        result = train_and_predict(tickers, category='CUSTOM', train_per_ticker=True)
         
         if result:
             result['timestamp'] = time.time()
@@ -189,99 +131,163 @@ def create_roc_curve_image(pipeline_result):
 
 def create_feature_importance_image(pipeline_result, top_n=15):
     """Generate feature importance chart as base64 image"""
-    classifier = pipeline_result['classifier']
-    feature_names = classifier.feature_names
-    
-    if hasattr(classifier.model, 'feature_importances_'):
-        importances = classifier.model.feature_importances_
-    else:
+    try:
+        classifier = pipeline_result.get('classifier')
+        if classifier is None:
+            return None
+        
+        feature_names = classifier.feature_names
+        
+        if hasattr(classifier.model, 'feature_importances_'):
+            importances = classifier.model.feature_importances_
+        else:
+            return None
+        
+        importance_df = pd.DataFrame({
+            'feature': feature_names,
+            'importance': importances
+        }).sort_values('importance', ascending=False).head(top_n)
+        
+        plt.figure(figsize=(8, 6))
+        sns.barplot(data=importance_df, x='importance', y='feature', palette='viridis')
+        plt.title(f'Top {top_n} Feature Importances')
+        plt.xlabel('Importance Score')
+        plt.ylabel('Feature')
+        plt.tight_layout()
+        
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+        buf.seek(0)
+        img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+        plt.close()
+        
+        return f"data:image/png;base64,{img_base64}"
+    except Exception as e:
+        print(f"  Warning: Feature importance chart failed: {e}")
         return None
-    
-    importance_df = pd.DataFrame({
-        'feature': feature_names,
-        'importance': importances
-    }).sort_values('importance', ascending=False).head(top_n)
-    
-    plt.figure(figsize=(8, 6))
-    sns.barplot(data=importance_df, x='importance', y='feature', palette='viridis')
-    plt.title(f'Top {top_n} Feature Importances')
-    plt.xlabel('Importance Score')
-    plt.ylabel('Feature')
-    plt.tight_layout()
-    
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-    buf.seek(0)
-    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-    plt.close()
-    
-    return f"data:image/png;base64,{img_base64}"
 
 def create_price_history_chart(pipeline_result):
     """Generate price history chart as base64 image"""
-    raw_data = pipeline_result['raw_data']
-    tickers = pipeline_result['tickers']
-    loader = pipeline_result['loader']
-    
-    plt.figure(figsize=(10, 6))
-    
-    for ticker in tickers:
-        try:
-            ticker_df = loader.get_ticker_data(ticker)
-            if not ticker_df.empty:
-                plt.plot(ticker_df.index, ticker_df['Close'], label=ticker, linewidth=2)
-        except:
-            continue
-    
-    plt.title('Price History (Last 2 Years)')
-    plt.xlabel('Date')
-    plt.ylabel('Price ($)')
-    plt.legend()
-    plt.grid(alpha=0.3)
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-    buf.seek(0)
-    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-    plt.close()
-    
-    return f"data:image/png;base64,{img_base64}"
+    try:
+        tickers = pipeline_result.get('tickers', [])
+        if not tickers:
+            # Try to get from loader
+            loader = pipeline_result.get('loader')
+            if loader and hasattr(loader, 'tickers'):
+                tickers = loader.tickers
+        
+        raw_data = pipeline_result.get('raw_data')
+        loader = pipeline_result.get('loader')
+        
+        plt.figure(figsize=(10, 6))
+        
+        if raw_data is not None and tickers:
+            for ticker in tickers:
+                try:
+                    if loader and hasattr(loader, 'get_ticker_data'):
+                        ticker_df = loader.get_ticker_data(ticker)
+                    else:
+                        # Try to extract from raw_data directly
+                        if isinstance(raw_data.columns, pd.MultiIndex):
+                            ticker_df = raw_data[ticker].copy()
+                        else:
+                            cols = [col for col in raw_data.columns if ticker in str(col)]
+                            ticker_df = raw_data[cols].copy()
+                            if 'Close' not in ticker_df.columns and len(ticker_df.columns) > 0:
+                                # Use first column as Close
+                                ticker_df['Close'] = ticker_df.iloc[:, 0]
+                    
+                    if not ticker_df.empty and 'Close' in ticker_df.columns:
+                        plt.plot(ticker_df.index, ticker_df['Close'], label=ticker, linewidth=2)
+                except Exception as e:
+                    print(f"  Warning: Could not plot {ticker}: {e}")
+                    continue
+        else:
+            # Fallback: try to plot from ticker_df if available
+            ticker_df = pipeline_result.get('ticker_df')
+            if ticker_df is not None and 'Close' in ticker_df.columns:
+                plt.plot(ticker_df.index, ticker_df['Close'], linewidth=2)
+                ticker_name = pipeline_result.get('ticker', 'Stock')
+                plt.title(f'{ticker_name} Price History (Last 2 Years)')
+        
+        if len(plt.gca().get_lines()) == 0:
+            # No data plotted, create empty chart
+            plt.text(0.5, 0.5, 'No price data available', 
+                    ha='center', va='center', transform=plt.gca().transAxes)
+        
+        plt.title('Price History (Last 2 Years)')
+        plt.xlabel('Date')
+        plt.ylabel('Price')
+        if len(plt.gca().get_lines()) > 0:
+            plt.legend()
+        plt.grid(alpha=0.3)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+        buf.seek(0)
+        img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+        plt.close()
+        
+        return f"data:image/png;base64,{img_base64}"
+    except Exception as e:
+        print(f"  Warning: Price history chart failed: {e}")
+        return None
 
 def create_returns_distribution_chart(pipeline_result):
     """Generate returns distribution as base64 image"""
-    combined_df = pipeline_result['combined_df']
-    primary_ticker = pipeline_result['primary_ticker']
-    
-    return_col = f'{primary_ticker}_return_1d'
-    
-    if return_col not in combined_df.columns:
+    try:
+        # Try to get data from different possible structures
+        combined_df = pipeline_result.get('combined_df')
+        ticker_df = pipeline_result.get('ticker_df')
+        primary_ticker = pipeline_result.get('primary_ticker')
+        ticker = pipeline_result.get('ticker')
+        
+        # Determine which dataframe and ticker to use
+        if combined_df is not None and primary_ticker:
+            df = combined_df
+            ticker_name = primary_ticker
+            return_col = f'{primary_ticker}_return_1d'
+        elif ticker_df is not None:
+            df = ticker_df
+            ticker_name = ticker or 'Stock'
+            return_col = 'return_1d'
+        else:
+            return None
+        
+        if return_col not in df.columns:
+            return None
+        
+        returns = df[return_col].dropna()
+        
+        if len(returns) == 0:
+            return None
+        
+        plt.figure(figsize=(8, 5))
+        plt.hist(returns * 100, bins=50, color='#3b82f6', alpha=0.7, edgecolor='black')
+        plt.axvline(0, color='red', linestyle='--', linewidth=2, label='Zero Return')
+        plt.title(f'{ticker_name} Daily Returns Distribution')
+        plt.xlabel('Return (%)')
+        plt.ylabel('Frequency')
+        plt.legend()
+        plt.grid(alpha=0.3)
+        plt.tight_layout()
+        
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+        buf.seek(0)
+        img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+        plt.close()
+        
+        return f"data:image/png;base64,{img_base64}"
+    except Exception as e:
+        print(f"  Warning: Returns distribution chart failed: {e}")
         return None
-    
-    returns = combined_df[return_col].dropna()
-    
-    plt.figure(figsize=(8, 5))
-    plt.hist(returns * 100, bins=50, color='#3b82f6', alpha=0.7, edgecolor='black')
-    plt.axvline(0, color='red', linestyle='--', linewidth=2, label='Zero Return')
-    plt.title(f'{primary_ticker} Daily Returns Distribution')
-    plt.xlabel('Return (%)')
-    plt.ylabel('Frequency')
-    plt.legend()
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-    buf.seek(0)
-    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-    plt.close()
-    
-    return f"data:image/png;base64,{img_base64}"
 
 @app.route('/api/predict', methods=['POST'])
 def predict():
-    """Main prediction endpoint"""
+    """Main prediction endpoint - trains separate model for each ticker and returns predictions with estimated prices"""
     try:
         data = request.get_json()
         tickers_input = data.get('tickers', '')
@@ -294,72 +300,70 @@ def predict():
         if not tickers:
             return jsonify({'error': 'No tickers provided'}), 400
         
+        # Train separate model for each ticker
         pipeline_result = get_or_create_model(tickers)
         
         if not pipeline_result:
-            return jsonify({'error': 'Failed to train model or insufficient data'}), 500
-        
-        classifier = pipeline_result['classifier']
-        combined_df = pipeline_result['combined_df']
-        primary_ticker = pipeline_result['primary_ticker']
-        main_prediction = pipeline_result['prediction']
+            return jsonify({'error': 'Failed to train models or insufficient data'}), 500
         
         predictions = []
+        all_metrics = []
         
-        for ticker in tickers:
-            try:
-                current_price = get_current_price(ticker)
+        # Check if we have per-ticker results
+        if pipeline_result.get('train_per_ticker') and 'results' in pipeline_result:
+            # Multiple tickers, each with their own model
+            for ticker, result in pipeline_result['results'].items():
+                pred = result['prediction']
+                currency = get_currency_symbol(ticker)
+                current_price = result.get('current_price') or get_current_price(ticker) or 0.0
                 
-                if ticker == primary_ticker:
-                    if current_price:
-                        if main_prediction['prediction'] == 'UP':
-                            predicted_price = current_price * (1 + np.random.uniform(0.005, 0.025))
-                            change = ((predicted_price - current_price) / current_price) * 100
-                        else:
-                            predicted_price = current_price * (1 - np.random.uniform(0.005, 0.025))
-                            change = ((predicted_price - current_price) / current_price) * 100
-                    else:
-                        current_price = 100.0
-                        predicted_price = 102.0 if main_prediction['prediction'] == 'UP' else 98.0
-                        change = 2.0 if main_prediction['prediction'] == 'UP' else -2.0
-                    
-                    predictions.append({
-                        'ticker': ticker,
-                        'currentPrice': round(current_price, 2),
-                        'predictedPrice': round(predicted_price, 2),
-                        'predictedChange': f"{'+' if change > 0 else ''}{change:.1f}%",
-                        'confidenceLevel': f"{int(main_prediction['confidence'] * 100)}%",
-                        'isPositive': main_prediction['prediction'] == 'UP'
-                    })
-                else:
-                    if current_price:
-                        ticker_cols = [col for col in combined_df.columns if col.startswith(f"{ticker}_")]
-                        
-                        if ticker_cols:
-                            movement = np.random.choice(['UP', 'DOWN'], p=[0.6, 0.4] if main_prediction['prediction'] == 'UP' else [0.4, 0.6])
-                            confidence = main_prediction['confidence'] * np.random.uniform(0.8, 1.0)
-                        else:
-                            movement = np.random.choice(['UP', 'DOWN'])
-                            confidence = np.random.uniform(0.55, 0.75)
-                        
-                        if movement == 'UP':
-                            predicted_price = current_price * (1 + np.random.uniform(0.005, 0.025))
-                            change = ((predicted_price - current_price) / current_price) * 100
-                        else:
-                            predicted_price = current_price * (1 - np.random.uniform(0.005, 0.025))
-                            change = ((predicted_price - current_price) / current_price) * 100
-                        
-                        predictions.append({
-                            'ticker': ticker,
-                            'currentPrice': round(current_price, 2),
-                            'predictedPrice': round(predicted_price, 2),
-                            'predictedChange': f"{'+' if change > 0 else ''}{change:.1f}%",
-                            'confidenceLevel': f"{int(confidence * 100)}%",
-                            'isPositive': movement == 'UP'
-                        })
-            except Exception as e:
-                print(f"Error predicting {ticker}: {e}")
-                continue
+                predictions.append({
+                    'ticker': ticker,
+                    'currentPrice': round(current_price, 2),
+                    'estimatedPrice': round(pred.get('estimated_price', current_price), 2) if pred.get('estimated_price') else None,
+                    'direction': pred['prediction'],  # 'UP' or 'DOWN'
+                    'arrow': pred.get('arrow', '↑' if pred['prediction'] == 'UP' else '↓'),
+                    'confidence': round(pred['confidence'] * 100, 1),
+                    'probabilityUp': round(pred['probability_up'] * 100, 1),
+                    'probabilityDown': round(pred['probability_down'] * 100, 1),
+                    'currency': currency,
+                    'isPositive': pred['prediction'] == 'UP',
+                    'hasRealPrediction': True
+                })
+                
+                all_metrics.append({
+                    'ticker': ticker,
+                    'accuracy': round(result['metrics']['test_accuracy'], 4),
+                    'roc_auc': round(result['metrics']['test_roc_auc'], 4)
+                })
+        else:
+            # Single ticker or combined model (legacy format)
+            primary_ticker = pipeline_result.get('primary_ticker', tickers[0])
+            main_prediction = pipeline_result['prediction']
+            currency = get_currency_symbol(primary_ticker)
+            current_price = get_current_price(primary_ticker) or 0.0
+            
+            estimated_price = main_prediction.get('estimated_price') if isinstance(main_prediction, dict) else None
+            
+            predictions.append({
+                'ticker': primary_ticker,
+                'currentPrice': round(current_price, 2),
+                'estimatedPrice': round(estimated_price, 2) if estimated_price else None,
+                'direction': main_prediction['prediction'] if isinstance(main_prediction, dict) else main_prediction,
+                'arrow': main_prediction.get('arrow', '↑' if (main_prediction['prediction'] == 'UP' if isinstance(main_prediction, dict) else False) else '↓'),
+                'confidence': round(main_prediction['confidence'] * 100, 1) if isinstance(main_prediction, dict) else 0,
+                'probabilityUp': round(main_prediction['probability_up'] * 100, 1) if isinstance(main_prediction, dict) else 0,
+                'probabilityDown': round(main_prediction['probability_down'] * 100, 1) if isinstance(main_prediction, dict) else 0,
+                'currency': currency,
+                'isPositive': (main_prediction['prediction'] == 'UP' if isinstance(main_prediction, dict) else False),
+                'hasRealPrediction': True
+            })
+            
+            all_metrics.append({
+                'ticker': primary_ticker,
+                'accuracy': round(pipeline_result['metrics']['test_accuracy'], 4),
+                'roc_auc': round(pipeline_result['metrics']['test_roc_auc'], 4)
+            })
         
         if not predictions:
             return jsonify({'error': 'No predictions could be generated'}), 500
@@ -367,11 +371,9 @@ def predict():
         return jsonify({
             'predictions': predictions,
             'metadata': {
-                'model_accuracy': round(pipeline_result['metrics']['test_accuracy'], 4),
-                'roc_auc': round(pipeline_result['metrics']['test_roc_auc'], 4),
-                'primary_ticker': primary_ticker,
-                'train_samples': len(pipeline_result['X_train']),
-                'test_samples': len(pipeline_result['X_test'])
+                'models_trained': len(predictions),
+                'per_ticker_models': pipeline_result.get('train_per_ticker', False),
+                'metrics': all_metrics
             }
         })
         
@@ -401,22 +403,78 @@ def get_visualizations():
         if not pipeline_result:
             return jsonify({'error': 'Model not found or failed to train'}), 500
         
-        metrics = pipeline_result['metrics']
-        
-        visualizations = {
-            'confusionMatrix': create_confusion_matrix_image(metrics['confusion_matrix']),
-            'rocCurve': create_roc_curve_image(pipeline_result),
-            'featureImportance': create_feature_importance_image(pipeline_result),
-            'priceHistory': create_price_history_chart(pipeline_result),
-            'returnsDistribution': create_returns_distribution_chart(pipeline_result),
-            'metrics': {
-                'train_accuracy': round(metrics['train_accuracy'], 4),
-                'test_accuracy': round(metrics['test_accuracy'], 4),
-                'test_f1': round(metrics['test_f1'], 4),
-                'test_roc_auc': round(metrics['test_roc_auc'], 4),
-                'confusion_matrix': metrics['confusion_matrix'].tolist()
+        # Handle per-ticker results (new format)
+        if pipeline_result.get('train_per_ticker') and 'results' in pipeline_result:
+            # Use the first ticker's results for visualizations (or primary ticker if single)
+            primary_ticker = tickers[0] if len(tickers) == 1 else tickers[0]
+            if primary_ticker in pipeline_result['results']:
+                result = pipeline_result['results'][primary_ticker]
+                metrics = result['metrics']
+                
+                # Create a compatible structure for visualization functions
+                # Create a mock loader object
+                class MockLoader:
+                    def __init__(self, ticker_df, ticker_name):
+                        self.ticker_df = ticker_df
+                        self.ticker_name = ticker_name
+                        self.tickers = [ticker_name]
+                    
+                    def get_ticker_data(self, ticker):
+                        if ticker == self.ticker_name:
+                            return self.ticker_df
+                        return None
+                
+                mock_loader = MockLoader(result['ticker_df'], primary_ticker)
+                
+                viz_result = {
+                    'classifier': result['classifier'],
+                    'X_test': result['X_test'],
+                    'y_test': result['y_test'],
+                    'tickers': [primary_ticker],
+                    'loader': mock_loader,
+                    'raw_data': result['raw_data'],
+                    'ticker_df': result['ticker_df'],  # For returns distribution
+                    'ticker': primary_ticker,  # For returns distribution
+                    'primary_ticker': primary_ticker,  # For returns distribution
+                    'combined_df': result['ticker_df']  # Alias for compatibility
+                }
+                
+                visualizations = {
+                    'confusionMatrix': create_confusion_matrix_image(metrics['confusion_matrix']),
+                    'rocCurve': create_roc_curve_image(viz_result),
+                    'featureImportance': create_feature_importance_image(viz_result),
+                    'priceHistory': create_price_history_chart(viz_result),
+                    'returnsDistribution': create_returns_distribution_chart(viz_result),
+                    'metrics': {
+                        'train_accuracy': round(metrics['train_accuracy'], 4),
+                        'test_accuracy': round(metrics['test_accuracy'], 4),
+                        'test_f1': round(metrics['test_f1'], 4),
+                        'test_roc_auc': round(metrics['test_roc_auc'], 4),
+                        'confusion_matrix': metrics['confusion_matrix'].tolist()
+                    }
+                }
+            else:
+                return jsonify({'error': 'No results found for primary ticker'}), 500
+        else:
+            # Handle legacy format (single combined model)
+            metrics = pipeline_result.get('metrics', {})
+            if not metrics:
+                return jsonify({'error': 'No metrics found in pipeline result'}), 500
+            
+            visualizations = {
+                'confusionMatrix': create_confusion_matrix_image(metrics['confusion_matrix']),
+                'rocCurve': create_roc_curve_image(pipeline_result),
+                'featureImportance': create_feature_importance_image(pipeline_result),
+                'priceHistory': create_price_history_chart(pipeline_result),
+                'returnsDistribution': create_returns_distribution_chart(pipeline_result),
+                'metrics': {
+                    'train_accuracy': round(metrics['train_accuracy'], 4),
+                    'test_accuracy': round(metrics['test_accuracy'], 4),
+                    'test_f1': round(metrics['test_f1'], 4),
+                    'test_roc_auc': round(metrics['test_roc_auc'], 4),
+                    'confusion_matrix': metrics['confusion_matrix'].tolist()
+                }
             }
-        }
         
         return jsonify(visualizations)
         
