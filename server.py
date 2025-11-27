@@ -765,11 +765,8 @@ def clear_cache():
     return jsonify({'status': 'cache cleared'})
 
 if __name__ == '__main__':
-    # Create necessary directories
-    os.makedirs('data', exist_ok=True)
-    os.makedirs('models', exist_ok=True)
-    os.makedirs('results', exist_ok=True)
-    os.makedirs('/var/log/supervisor', exist_ok=True)
+    
+    
     
     print("="*70)
     print("MARKET MOVEMENT CLASSIFIER API SERVER")
