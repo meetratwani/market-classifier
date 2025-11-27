@@ -4,16 +4,18 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     supervisor \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY . .
 
 RUN pip install -r requirements.txt
 
-RUN mkdir -p /var/log/supervisor
-COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+RUN mkdir -p /var/log/supervisor /var/run
+
+COPY supervisord.conf /etc/supervisor/supervisord.conf
 
 EXPOSE 5000
 EXPOSE 8080
 
-CMD ["/usr/bin/supervisord"]
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf"]
