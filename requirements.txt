@@ -23,6 +23,7 @@ seaborn==0.13.0
 # Utilities
 python-dateutil==2.9.0.post0
 pytz==2025.2
+feedparser==6.0.10  # For Google News RSS fallback
 
 # Enhanced features for hackathon
 lightgbm==4.1.0  # For ensemble models

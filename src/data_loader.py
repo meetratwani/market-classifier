@@ -123,7 +123,7 @@ class CleanEnergyDataLoader:
         print("\nTrying individual ticker downloads...")
         return self._download_individually(period, interval)
     
-    def _download_individually(self, period='2y', interval='1d'):
+    def _download_individually(self, period='5y', interval='1d'):
         """Download each ticker separately as fallback"""
         all_data = {}
         

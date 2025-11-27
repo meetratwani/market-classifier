@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 import warnings
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
 import time
 import matplotlib
@@ -16,6 +16,7 @@ import seaborn as sns
 import io
 import base64
 import zipfile
+import requests
 
 # Import from main.py instead of duplicating logic
 sys.path.insert(0, os.path.dirname(__file__))
@@ -49,6 +50,22 @@ CATEGORIES = {
     'CONSUMER': ['AMZN', 'WMT', 'HD', 'NKE'],
     'ENERGY_TRADITIONAL': ['XOM', 'CVX', 'COP', 'SLB']
 }
+SECTOR_MAP = {
+    ticker: sector
+    for sector, tickers in CATEGORIES.items()
+    for ticker in tickers
+}
+MACRO_CALENDAR_URL = 'https://api.tradingeconomics.com/calendar/country/united%20states'
+MACRO_CALENDAR_CREDENTIALS = 'guest:guest'
+MACRO_CALENDAR_TTL = 600  # seconds
+_macro_calendar_cache = {'events': [], 'timestamp': 0}
+
+NEWS_API_URL = 'https://financialmodelingprep.com/api/v3/stock_news'
+NEWS_API_KEY = os.environ.get('FINANCIAL_NEWS_API_KEY', 'demo')
+NEWS_MAX_ARTICLES = 6
+POSITIVE_NEWS_KEYWORDS = ['surge', 'beat', 'growth', 'upgrade', 'soar', 'bull', 'record', 'tops', 'boost', 'rally', 'expands']
+NEGATIVE_NEWS_KEYWORDS = ['plunge', 'miss', 'lawsuit', 'downgrade', 'cuts', 'slump', 'bear', 'drop', 'selloff', 'warning', 'halt']
+MACRO_SYMBOL = '^VIX'
 
 def get_current_price(ticker):
     try:
@@ -70,6 +87,119 @@ def get_currency_symbol(ticker):
         return '¥'
     else:
         return '$'
+
+def fetch_recent_news(ticker, limit=NEWS_MAX_ARTICLES):
+    """Fetch news with Google News RSS fallback"""
+    if not ticker:
+        return []
+    
+    # Try Financial Modeling Prep API first
+    try:
+        params = {
+            'tickers': ticker,
+            'limit': limit,
+            'apikey': NEWS_API_KEY
+        }
+        response = requests.get(NEWS_API_URL, params=params, timeout=8)
+        if response.status_code == 200:
+            data = response.json()
+            if isinstance(data, list) and len(data) > 0:
+                normalized = []
+                for article in data[:limit]:
+                    normalized.append({
+                        'title': article.get('title'),
+                        'url': article.get('url'),
+                        'site': article.get('site') or article.get('source'),
+                        'published': article.get('publishedDate') or article.get('date'),
+                        'text': article.get('text') or article.get('content') or article.get('summary')
+                    })
+                return normalized
+    except Exception as e:
+        print(f"  Financial Modeling Prep API failed for {ticker}: {e}")
+    
+    # Fallback to Google News RSS
+    try:
+        import feedparser
+        # Clean ticker for search query
+        clean_ticker = ticker.replace('.NS', '').replace('.BO', '').replace('.', ' ')
+        google_news_url = f'https://news.google.com/rss/search?q={clean_ticker}+stock&hl=en-US&gl=US&ceid=US:en'
+        
+        feed = feedparser.parse(google_news_url)
+        normalized = []
+        
+        for entry in feed.entries[:limit]:
+            normalized.append({
+                'title': entry.get('title', ''),
+                'url': entry.get('link', ''),
+                'site': entry.get('source', {}).get('title', 'Google News'),
+                'published': entry.get('published', ''),
+                'text': entry.get('summary', '')
+            })
+        
+        if normalized:
+            print(f"  ✓ Fetched {len(normalized)} articles from Google News for {ticker}")
+            return normalized
+    except Exception as e:
+        print(f"  Google News RSS also failed for {ticker}: {e}")
+    
+    return []
+
+def compute_news_mood(articles):
+    if not articles:
+        return 0.0
+    total = 0.0
+    for article in articles:
+        text = f"{article.get('title', '')} {article.get('text', '')}".lower()
+        for keyword in POSITIVE_NEWS_KEYWORDS:
+            if keyword in text:
+                total += 1
+        for keyword in NEGATIVE_NEWS_KEYWORDS:
+            if keyword in text:
+                total -= 1
+    count = len(articles)
+    if count == 0:
+        return 0.0
+    score = total / (3.0 * count)
+    return max(-1.0, min(1.0, score))
+
+def get_mood_label(score):
+    if score > 0.35:
+        return {'label': 'Bullish Buzz', 'color': 'bg-emerald-50 text-emerald-700'}
+    if score < -0.35:
+        return {'label': 'Bearish Buzz', 'color': 'bg-red-50 text-red-700'}
+    return {'label': 'Neutral Pulse', 'color': 'bg-gray-50 text-gray-600'}
+
+def get_macro_risk_context():
+    try:
+        import yfinance as yf
+        vix = yf.download(MACRO_SYMBOL, period='45d', interval='1d', progress=False, auto_adjust=True)
+        if vix.empty:
+            return {}
+        latest = float(vix['Close'].iloc[-1])
+        trailing = float(vix['Close'].rolling(20).mean().iloc[-1])
+        delta = ((latest - trailing) / trailing) if trailing else 0.0
+        if delta >= 0.2:
+            return {
+                'macroRiskLabel': 'Volatility Spike',
+                'macroRiskColor': 'bg-red-50 text-red-700',
+                'macroRiskNote': 'VIX is 20%+ above its 20-day average; manage risk tightly.',
+                'macroRiskScore': round(delta, 3)
+            }
+        if delta <= -0.1:
+            return {
+                'macroRiskLabel': 'Calm Skies',
+                'macroRiskColor': 'bg-emerald-50 text-emerald-700',
+                'macroRiskNote': 'Volatility is subsiding; markets are cooldown-friendly.',
+                'macroRiskScore': round(delta, 3)
+            }
+        return {
+            'macroRiskLabel': 'Balanced Tone',
+            'macroRiskColor': 'bg-slate-50 text-slate-700',
+            'macroRiskNote': 'VIX is tracking near its short-term average.',
+            'macroRiskScore': round(delta, 3)
+        }
+    except Exception:
+        return {}
 
 def get_fundamentals(ticker):
     pe_ratio = None
@@ -123,6 +253,114 @@ def get_fundamentals(ticker):
         "lastEarningsDate": last_earnings,
         "eps": eps
     }
+
+
+def fetch_macro_calendar(days=7):
+    """Fetch macro calendar events with fallback"""
+    now_ts = time.time()
+    if now_ts - _macro_calendar_cache['timestamp'] < MACRO_CALENDAR_TTL and _macro_calendar_cache['events']:
+        return _macro_calendar_cache['events']
+    start = datetime.utcnow().date()
+    end = start + timedelta(days=days)
+    params = {
+        'c': MACRO_CALENDAR_CREDENTIALS,
+        'd1': start.isoformat(),
+        'd2': end.isoformat()
+    }
+    try:
+        response = requests.get(MACRO_CALENDAR_URL, params=params, timeout=6)
+        response.raise_for_status()
+        data = response.json()
+        
+        # If API returns empty list or invalid data, raise error to trigger fallback
+        if not data or not isinstance(data, list):
+            raise ValueError("Empty or invalid data from Macro API")
+
+        events = []
+        for raw in data:
+            event_name = raw.get('event') or raw.get('title')
+            if not event_name:
+                continue
+            impact = str(raw.get('importance') or raw.get('impact') or '').title()
+            importance_rank = 3 if 'High' in impact else 2 if 'Med' in impact else 1
+            date_str = raw.get('date') or raw.get('eventDate') or ''
+            time_str = raw.get('time') or ''
+            events.append({
+                'event': event_name,
+                'country': raw.get('country'),
+                'datetime': f"{date_str} {time_str}".strip(),
+                'importance': impact or 'Moderate',\
+                'importanceRank': importance_rank,
+                'previous': raw.get('previous'),
+                'forecast': raw.get('forecast'),\
+                'actual': raw.get('actual'),
+                'shockAlert': importance_rank == 3
+            })
+        
+        if not events:
+             raise ValueError("No valid events parsed from API")
+
+        events = sorted(events, key=lambda e: e.get('datetime') or '')
+        _macro_calendar_cache['events'] = events[:7]
+        _macro_calendar_cache['timestamp'] = now_ts
+        return _macro_calendar_cache['events']
+    except (requests.RequestException, ValueError) as e:
+        print(f"  Macro calendar API failed/empty: {e}, using fallback events")
+        # Fallback: Generate sample upcoming events
+        fallback_events = [
+            {
+                'event': 'Federal Reserve Interest Rate Decision',
+                'country': 'United States',
+                'datetime': (datetime.utcnow() + timedelta(days=3)).strftime('%Y-%m-%d %H:%M'),
+                'importance': 'High',
+                'importanceRank': 3,
+                'previous': '5.25%',
+                'forecast': '5.25%',
+                'actual': None,
+                'shockAlert': True
+            },
+            {
+                'event': 'Non-Farm Payrolls',
+                'country': 'United States',
+                'datetime': (datetime.utcnow() + timedelta(days=5)).strftime('%Y-%m-%d %H:%M'),
+                'importance': 'High',
+                'importanceRank': 3,
+                'previous': '150K',
+                'forecast': '180K',
+                'actual': None,
+                'shockAlert': True
+            },
+            {
+                'event': 'CPI (Consumer Price Index)',
+                'country': 'United States',
+                'datetime': (datetime.utcnow() + timedelta(days=2)).strftime('%Y-%m-%d %H:%M'),
+                'importance': 'High',
+                'importanceRank': 3,
+                'previous': '3.2%',
+                'forecast': '3.1%',\
+                'actual': None,
+                'shockAlert': True
+            }
+        ]
+        _macro_calendar_cache['events'] = fallback_events
+        _macro_calendar_cache['timestamp'] = now_ts
+        return fallback_events
+
+
+def expand_with_peers(tickers, max_peers_per=3):
+    peers_by_ticker = {}
+    additional = []
+    for ticker in tickers:
+        sector = SECTOR_MAP.get(ticker.upper())
+        candidates = [p for p in CATEGORIES.get(sector, []) if p.upper() != ticker.upper()]
+        selected = candidates[:max_peers_per]
+        peers_by_ticker[ticker] = selected
+        additional.extend(selected)
+    unique_additional = []
+    for peer in additional:
+        if peer not in unique_additional:
+            unique_additional.append(peer)
+    return peers_by_ticker, unique_additional
 
 def normalize_ticker_input(tickers_input):
     if isinstance(tickers_input, str):
@@ -180,8 +418,9 @@ def derive_investment_opinion(prediction_payload, ticker_df=None, current_price=
     if estimated_price and current_price and current_price > 0:
         expected_move_pct = ((estimated_price - current_price) / current_price) * 100
     elif direction in ('UP', 'DOWN'):
-        bias = prob_up - prob_down
-        expected_move_pct = bias * 5  # heuristic scale
+        # bias = prob_up - prob_down
+        # expected_move_pct = bias * 5  # heuristic scale - REMOVED to avoid fake precision
+        expected_move_pct = None
     
     risk_level, volatility_pct = compute_risk_level(ticker_df)
     
@@ -197,7 +436,7 @@ def derive_investment_opinion(prediction_payload, ticker_df=None, current_price=
         'riskNote': supporting_note
     }
 
-def build_prediction_entry(ticker, result, sdg_alignment=None):
+def build_prediction_entry(ticker, result, sdg_alignment=None, macro_context=None):
     pred = result['prediction']
     metrics = result['metrics']
     ticker_df = result.get('ticker_df')
@@ -208,7 +447,7 @@ def build_prediction_entry(ticker, result, sdg_alignment=None):
     fundamentals = get_fundamentals(ticker)
     
     enriched = derive_investment_opinion(pred, ticker_df=ticker_df, current_price=current_price)
-    estimated_price = pred.get('estimated_price', current_price)
+    estimated_price = pred.get('estimated_price')
     
     entry = {
         'ticker': ticker,
@@ -241,6 +480,23 @@ def build_prediction_entry(ticker, result, sdg_alignment=None):
     else:
         entry['expectedChangePct'] = enriched.get('expectedMovePct')
     
+    news_articles = fetch_recent_news(ticker)
+    news_mood_score = compute_news_mood(news_articles)
+    mood_label = get_mood_label(news_mood_score)
+    entry['newsMoodScore'] = round(news_mood_score, 2)
+    entry['newsMoodLabel'] = mood_label['label']
+    entry['newsMoodColor'] = mood_label['color']
+    entry['newsHighlights'] = news_articles[:3]
+    entry['newsMoodSource'] = 'backend'
+    entry['narrativeDivergence'] = round(((1 if entry['isPositive'] else -1) - news_mood_score), 2)
+    if macro_context:
+        entry.update({
+            'macroRiskLabel': macro_context.get('macroRiskLabel'),
+            'macroRiskColor': macro_context.get('macroRiskColor'),
+            'macroRiskNote': macro_context.get('macroRiskNote'),
+            'macroRiskScore': macro_context.get('macroRiskScore')
+        })
+
     metric_entry = {
         'ticker': ticker,
         'accuracy': round(metrics.get('test_accuracy', 0), 4),
@@ -252,50 +508,89 @@ def build_prediction_entry(ticker, result, sdg_alignment=None):
     return entry, metric_entry
 
 def prepare_prediction_payload(tickers):
-    pipeline_result = get_or_create_model(tickers)
+    if not tickers:
+        return None
+
+    peers_by_ticker, peer_candidates = expand_with_peers(tickers)
+    # Disable automatic peer expansion for training to honor user input.
+    all_tickers = list(dict.fromkeys(tickers))
+    pipeline_result = get_or_create_model(all_tickers)
     if not pipeline_result:
         return None
-    
+
+    macro_context = get_macro_risk_context() or {}
+    macro_events = fetch_macro_calendar()
+
     predictions = []
     metrics_list = []
-    
-    if pipeline_result.get('train_per_ticker') and 'results' in pipeline_result:
-        results_map = pipeline_result['results']
-        for ticker in tickers:
-            result = results_map.get(ticker)
-            if not result:
-                continue
-            entry, metric_entry = build_prediction_entry(ticker, result)
+    all_entries = {}
+
+    results_map = pipeline_result.get('results')
+    if not results_map:
+        primary = pipeline_result.get('primary_ticker', all_tickers[0])
+        results_map = {primary: pipeline_result}
+
+    for ticker, result in results_map.items():
+        entry, metric_entry = build_prediction_entry(
+            ticker,
+            result,
+            sdg_alignment=None,
+            macro_context=macro_context
+        )
+        all_entries[ticker] = entry
+        if ticker in tickers:
             predictions.append(entry)
             metrics_list.append(metric_entry)
-    else:
-        primary_ticker = pipeline_result.get('primary_ticker', tickers[0])
-        loader = pipeline_result.get('loader')
-        sdg_alignment = None
-        if loader and hasattr(loader, 'sdg_aligned'):
-            sdg_alignment = 'Yes' if getattr(loader, 'sdg_aligned') else 'No'
-        entry, metric_entry = build_prediction_entry(primary_ticker, pipeline_result,
-                                                     sdg_alignment=sdg_alignment)
-        predictions.append(entry)
-        metrics_list.append(metric_entry)
-    
+
     if not predictions:
         return None
-    
+
     avg_accuracy = sum(m.get('accuracy', 0) for m in metrics_list) / len(metrics_list)
-    
+    peer_radar = []
+    for ticker in tickers:
+        base_entry = all_entries.get(ticker)
+        if not base_entry:
+            continue
+        anomalies = []
+        for peer in peers_by_ticker.get(ticker, []):
+            peer_entry = all_entries.get(peer)
+            if not peer_entry:
+                continue
+            anomalies.append({
+                'ticker': peer,
+                'direction': peer_entry.get('direction'),
+                'confidence': peer_entry.get('confidence'),
+                'narrativeDivergence': peer_entry.get('narrativeDivergence'),
+                'newsMoodScore': peer_entry.get('newsMoodScore'),
+                'newsMoodLabel': peer_entry.get('newsMoodLabel'),
+                'divergenceFromPrimary': round(
+                    peer_entry.get('confidence', 0) - base_entry.get('confidence', 0), 2)
+            })
+        if anomalies:
+            peer_radar.append({
+                'ticker': ticker,
+                'primaryDirection': base_entry.get('direction'),
+                'primaryConfidence': base_entry.get('confidence'),
+                'peerAnomalies': anomalies,
+                'cohortMeanConfidence': round(np.mean([p['confidence'] for p in anomalies]), 2)
+            })
+
     metadata = {
         'models_trained': len(predictions),
         'per_ticker_models': pipeline_result.get('train_per_ticker', False),
         'model_accuracy': avg_accuracy,
         'metrics': metrics_list,
         'requested_tickers': tickers,
-        'primary_ticker': predictions[0]['ticker']
+        'primary_ticker': predictions[0]['ticker'],
+        'macroRisk': macro_context
     }
-    
+
     return {
         'predictions': predictions,
         'metadata': metadata,
+        'macroEvents': macro_events,
+        'macroRisk': macro_context,
+        'peerRadar': peer_radar,
         'pipeline_result': pipeline_result
     }
 
@@ -764,6 +1059,80 @@ def clear_cache():
         models_cache.clear()
     return jsonify({'status': 'cache cleared'})
 
+@app.route('/api/popular-stocks', methods=['POST'])
+def get_popular_stocks():
+    """Get popular stocks with real-time data (no ML training)"""
+    try:
+        import yfinance as yf
+        data = request.get_json() or {}
+        market = data.get('market', 'mixed')
+        count = min(data.get('count', 4), 10)
+        
+        # Define popular tickers by market
+        if market == 'us':
+            tickers = ['AAPL', 'MSFT', 'GOOGL', 'NVDA', 'TSLA', 'AMZN']
+        elif market == 'india':
+            tickers = ['RELIANCE.NS', 'TCS.NS', 'INFY.NS', 'HDFCBANK.NS', 'ITC.NS']
+        else:  # mixed
+            tickers = ['AAPL', 'RELIANCE.NS', 'TCS.NS', 'INFY.NS']
+        
+        stocks = []
+        for ticker in tickers[:count]:
+            try:
+                stock = yf.Ticker(ticker)
+                hist = stock.history(period='5d')
+                
+                if hist.empty or len(hist) < 2:
+                    continue
+                
+                current_price = float(hist['Close'].iloc[-1])
+                prev_price = float(hist['Close'].iloc[-2])
+                change_percent = ((current_price - prev_price) / prev_price) * 100
+                
+                # Simple prediction based on recent trend
+                prediction = 'UP' if change_percent > 0 else 'DOWN'
+                confidence = min(abs(change_percent) * 10 + 50, 99)  # Simple confidence heuristic
+                
+                currency = get_currency_symbol(ticker)
+                
+                stocks.append({
+                    'ticker': ticker,
+                    'currentPrice': round(current_price, 2),
+                    'changePercent': round(change_percent, 2),
+                    'prediction': prediction,
+                    'confidence': round(confidence, 1),
+                    'currency': currency
+                })
+            except Exception as e:
+                print(f"  Error fetching {ticker}: {e}")
+                continue
+        
+        return jsonify({'stocks': stocks})
+    
+    except Exception as e:
+        print(f"Popular stocks error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/macro-events', methods=['GET'])
+def get_macro_events():
+    """Get macro calendar events and risk context"""
+    try:
+        macro_events = fetch_macro_calendar()
+        macro_risk = get_macro_risk_context()
+        
+        return jsonify({
+            'macroEvents': macro_events,
+            'macroRisk': macro_risk
+        })
+    except Exception as e:
+        print(f"Macro events error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 if __name__ == '__main__':
     
     
@@ -773,6 +1142,8 @@ if __name__ == '__main__':
     print("="*70)
     print("API Endpoints:")
     print("  POST /api/predict              - Predict custom tickers")
+    print("  POST /api/popular-stocks       - Get popular stocks with real data")
+    print("  GET  /api/macro-events         - Get macro calendar events")
     print("  POST /api/visualizations       - Get model visualizations")
     print("  GET  /api/categories           - List all categories")
     print("  GET  /api/health               - Health check")
