@@ -103,7 +103,6 @@
         let currentTickers = '';
 
         function formatCurrency(amount, currency) {
-            // Use Intl.NumberFormat for proper currency formatting
             const formatter = new Intl.NumberFormat('en-US', {
                 minimumFractionDigits: 2,
                 maximumFractionDigits: 2
@@ -118,10 +117,14 @@
             const directionText = stock.direction || (stock.isPositive ? 'UP' : 'DOWN');
             const currency = stock.currency || '$';
             
-            // Format current price with proper currency
             const currentPriceFormatted = formatCurrency(stock.currentPrice, currency);
             const estimatedPriceFormatted = stock.estimatedPrice ? formatCurrency(stock.estimatedPrice, currency) : 'N/A';
             const priceChange = stock.estimatedPrice ? ((stock.estimatedPrice - stock.currentPrice) / stock.currentPrice * 100).toFixed(2) : null;
+            const peText = stock.peRatio !== null && stock.peRatio !== undefined ? stock.peRatio.toFixed(2) : 'N/A';
+            const divYieldText = stock.dividendYield !== null && stock.dividendYield !== undefined ? stock.dividendYield.toFixed(2) + '%' : 'N/A';
+            const nextEarningsText = stock.nextEarningsDate ? new Date(stock.nextEarningsDate).toLocaleDateString() : 'N/A';
+            const lastEarningsText = stock.lastEarningsDate ? new Date(stock.lastEarningsDate).toLocaleDateString() : null;
+            const epsText = stock.eps !== null && stock.eps !== undefined ? stock.eps.toFixed(2) : null;
 
             return `
                 <div class="p-4 border-t border-gray-100 mt-4 first:mt-0 ${stock.hasRealPrediction ? '' : 'opacity-60'}">
@@ -165,6 +168,15 @@
                         <div class="font-medium text-gray-700">Expected Move:</div>
                         <div class="text-right font-semibold ${colorClass}">${stock.expectedChangePct > 0 ? '+' : ''}${stock.expectedChangePct}%</div>
                         ` : ''}
+
+                        <div class="font-medium text-gray-700">P/E Ratio:</div>
+                        <div class="text-right font-semibold">${peText}</div>
+
+                        <div class="font-medium text-gray-700">Dividend Yield:</div>
+                        <div class="text-right font-semibold">${divYieldText}</div>
+
+                        <div class="font-medium text-gray-700">Next Earnings:</div>
+                        <div class="text-right font-semibold">${nextEarningsText}</div>
                     </div>
 
                     <div class="mt-5 p-3 bg-gray-50 border border-gray-200 rounded-lg">
@@ -177,6 +189,11 @@
                         </div>
                         <p class="text-sm text-gray-600 mt-2">${stock.rationale || 'Action rationale unavailable.'}</p>
                         <p class="text-xs text-gray-400 mt-1">${stock.riskNote || ''}</p>
+                        ${lastEarningsText || epsText ? `
+                        <p class="text-xs text-gray-500 mt-2">
+                            Recent earnings${lastEarningsText ? ` on <span class="font-semibold">${lastEarningsText}</span>` : ''}${epsText ? `, EPS <span class="font-semibold">${epsText}</span>` : ''}.
+                        </p>
+                        ` : ''}
                     </div>
                 </div>
             `;
@@ -213,7 +230,9 @@
                     <p class="text-gray-600 text-sm">${message}</p>
                 </div>
             `;
-            lucide.createIcons();
+            if (window.lucide && typeof lucide.createIcons === 'function') {
+                lucide.createIcons();
+            }
         }
 
         async function handleSearch() {
@@ -311,7 +330,6 @@
                             </button>
                         </div>
 
-                        <!-- Metrics Grid -->
                         <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
                             <div class="bg-blue-50 p-4 rounded-lg text-center">
                                 <div class="text-xs text-gray-600 mb-1">Train Accuracy</div>
@@ -331,7 +349,6 @@
                             </div>
                         </div>
 
-                        <!-- Visualizations -->
                         <div class="space-y-6">
                             <div>
                                 <h3 class="text-lg font-semibold text-gray-800 mb-2">Price History (2 Years)</h3>
@@ -382,8 +399,9 @@
                         </div>
                     </div>
                 `;
-
-                lucide.createIcons();
+                if (window.lucide && typeof lucide.createIcons === 'function') {
+                    lucide.createIcons();
+                }
                 
             } catch (error) {
                 console.error('Error loading visualizations:', error);
@@ -398,7 +416,9 @@
                         </button>
                     </div>
                 `;
-                lucide.createIcons();
+                if (window.lucide && typeof lucide.createIcons === 'function') {
+                    lucide.createIcons();
+                }
             }
         }
 
@@ -456,7 +476,9 @@
         }
 
         window.onload = () => {
-            lucide.createIcons();
+            if (window.lucide && typeof lucide.createIcons === 'function') {
+                lucide.createIcons();
+            }
             document.getElementById('search-input').value = "AAPL, TSLA, GOOGL";
             document.getElementById('search-input').addEventListener('keypress', handleKeyPress);
             
@@ -506,7 +528,6 @@
             <div class="text-center p-8 text-gray-400">Search for stocks to see predictions...</div>
         </div>
 
-        <!-- Action Buttons -->
         <div class="px-4 pb-4 space-y-2">
             <button id="view-viz-btn" onclick="showVisualizations()" class="hidden w-full bg-gradient-to-r from-blue-500 to-purple-600 text-white py-3 rounded-lg hover:from-blue-600 hover:to-purple-700 transition font-semibold flex items-center justify-center space-x-2">
                 <i data-lucide="bar-chart-3" class="lucide w-5 h-5"></i>
@@ -524,10 +545,8 @@
         </footer>
     </div>
 
-    <!-- Visualization Modal -->
     <div id="viz-modal" class="modal">
         <div class="modal-content" id="viz-content">
-            <!-- Content loaded dynamically -->
         </div>
     </div>
 
