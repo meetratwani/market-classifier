@@ -12,19 +12,12 @@ from feature_engineering import FeatureEngineer
 from model_training import XGBoostMarketClassifier
 
 def train_single_ticker(ticker, market_data=None, use_significant_moves=False):
-    """
-    Train model for a single ticker
-    
-    Returns:
-        Dictionary with model results or None if failed
-    """
     import yfinance as yf
     from data_loader import CleanEnergyDataLoader
     from feature_engineering import FeatureEngineer
     from model_training import XGBoostMarketClassifier
     
     try:
-        # Download data for single ticker
         loader = CleanEnergyDataLoader(category='CUSTOM', custom_tickers=[ticker])
         raw_data = loader.download_data(period='2y', interval='1d')
         
@@ -37,16 +30,13 @@ def train_single_ticker(ticker, market_data=None, use_significant_moves=False):
         if ticker_df.empty or len(ticker_df) < 50:
             return None
         
-        # Create features
         ticker_df = engineer.create_all_features(
             ticker_df,
             ticker_prefix='',
             market_data=market_data,
-            ticker_dfs_dict=None  # No cross-ticker features for single ticker
+            ticker_dfs_dict=None
         )
         
-        # Create target
-        # For single ticker, column is just 'Close', not '{ticker}_Close'
         if use_significant_moves:
             ticker_df = engineer.create_target_label_significant(ticker_df, target_ticker='', threshold=0.02)
         else:
@@ -55,7 +45,6 @@ def train_single_ticker(ticker, market_data=None, use_significant_moves=False):
         if len(ticker_df) < 50:
             return None
         
-        # Train model
         use_feature_selection = ticker_df.shape[1] > 100
         top_k = min(150, ticker_df.shape[1] - 2)
         
@@ -73,7 +62,6 @@ def train_single_ticker(ticker, market_data=None, use_significant_moves=False):
         classifier.train(X_train, y_train, use_tuning=use_tuning)
         metrics = classifier.evaluate(X_train, X_test, y_train, y_test)
         
-        # Get current price for prediction
         try:
             stock = yf.Ticker(ticker)
             hist = stock.history(period='1d')
@@ -81,7 +69,6 @@ def train_single_ticker(ticker, market_data=None, use_significant_moves=False):
         except:
             current_price = None
         
-        # Make prediction
         exclude_cols = ['target', 'future_close'] + (['return'] if use_significant_moves else [])
         latest_features = ticker_df.drop(columns=[col for col in exclude_cols if col in ticker_df.columns]).iloc[[-1]]
         next_day_pred = classifier.predict_next_day(latest_features, current_price=current_price)
@@ -107,16 +94,6 @@ def train_single_ticker(ticker, market_data=None, use_significant_moves=False):
 
 
 def main(category='SDG_CLEAN_ENERGY', custom_tickers=None, use_significant_moves=False):
-    """
-    Main execution pipeline for multi-category market prediction
-    
-    Args:
-        category: Predefined category or 'CUSTOM'
-        custom_tickers: List of custom tickers (if category='CUSTOM')
-        use_significant_moves: If True, predict only significant moves (>2%)
-    """
-    
-    # Create directories
     os.makedirs('data', exist_ok=True)
     os.makedirs('models', exist_ok=True)
     os.makedirs('results', exist_ok=True)
@@ -125,7 +102,6 @@ def main(category='SDG_CLEAN_ENERGY', custom_tickers=None, use_significant_moves
     print("MULTI-CATEGORY MARKET MOVEMENT CLASSIFIER")
     print("="*70)
     
-    # 1. DATA LOADING
     print("\n[1/6] Loading Data...")
     
     if custom_tickers:
@@ -133,7 +109,6 @@ def main(category='SDG_CLEAN_ENERGY', custom_tickers=None, use_significant_moves
     else:
         loader = CleanEnergyDataLoader(category=category)
     
-    # Show SDG info if applicable
     sdg_info = loader.get_sdg_info()
     if sdg_info.get('sdg_aligned'):
         print(f"\n🌍 SDG #{sdg_info['sdg_number']}: {sdg_info['sdg_name']}")
@@ -150,14 +125,11 @@ def main(category='SDG_CLEAN_ENERGY', custom_tickers=None, use_significant_moves
         print("Please check internet connection or try different tickers.")
         return None
     
-    # 2. FEATURE ENGINEERING
     print("\n[2/6] Engineering Features...")
     engineer = FeatureEngineer()
     
-    # Download market data (SPY) for regime features
     market_data = None
     try:
-        print("  Downloading market data (SPY) for regime features...")
         import yfinance as yf
         spy_data = yf.download('SPY', period='2y', interval='1d', progress=False, auto_adjust=True)
         if not spy_data.empty:
@@ -167,7 +139,6 @@ def main(category='SDG_CLEAN_ENERGY', custom_tickers=None, use_significant_moves
     except Exception as e:
         print(f"  ⚠️  Could not download market data: {e}")
     
-    # Store ticker dataframes for correlation features
     ticker_dfs_dict = {}
     all_ticker_features = []
     
@@ -180,7 +151,6 @@ def main(category='SDG_CLEAN_ENERGY', custom_tickers=None, use_significant_moves
                 print(f"  ⚠️  Insufficient data for {ticker}, skipping...")
                 continue
             
-            # Store for correlation features
             ticker_dfs_dict[ticker] = ticker_df.copy()
                 
             ticker_df = engineer.create_all_features(
@@ -200,7 +170,6 @@ def main(category='SDG_CLEAN_ENERGY', custom_tickers=None, use_significant_moves
         print("\n❌ No ticker data was successfully processed!")
         return None
     
-    # Combine all tickers
     combined_df = pd.concat(all_ticker_features, axis=1)
     combined_df = combined_df.dropna()
     
@@ -208,7 +177,6 @@ def main(category='SDG_CLEAN_ENERGY', custom_tickers=None, use_significant_moves
         print(f"\n❌ Insufficient samples: {len(combined_df)} (need at least 50)")
         return None
     
-    # Create target label
     primary_ticker = loader.tickers[0]
     print(f"  Creating target labels using {primary_ticker}...")
     
@@ -219,14 +187,11 @@ def main(category='SDG_CLEAN_ENERGY', custom_tickers=None, use_significant_moves
         print("  Mode: Predicting ANY move (UP/DOWN)")
         combined_df = engineer.create_target_label(combined_df, target_ticker=primary_ticker, forward_days=1)
     
-    # Save processed data
     output_file = f'data/{category.lower()}_data.csv'
     combined_df.to_csv(output_file)
     print(f"  ✓ Saved: {combined_df.shape[0]} samples, {combined_df.shape[1]-1} features")
     
-    # 3. MODEL TRAINING
     print("\n[3/6] Training XGBoost Model...")
-    # Use feature selection for datasets with many features
     use_feature_selection = combined_df.shape[1] > 100
     top_k = min(150, combined_df.shape[1] - 2)  # Select top 150 or all if less
     
@@ -244,11 +209,9 @@ def main(category='SDG_CLEAN_ENERGY', custom_tickers=None, use_significant_moves
     if len(X_train) < 30:
         print("\n⚠️  Warning: Small training set. Results may not be reliable.")
     
-    # Use hyperparameter tuning for better performance
     use_tuning = len(X_train) > 100
     classifier.train(X_train, y_train, use_tuning=use_tuning)
     
-    # 4. EVALUATION
     print("\n[4/6] Evaluating Model...")
     metrics = classifier.evaluate(X_train, X_test, y_train, y_test)
     
@@ -264,19 +227,16 @@ def main(category='SDG_CLEAN_ENERGY', custom_tickers=None, use_significant_moves
     print("\nClassification Report:")
     print(metrics['classification_report'])
     
-    # 5. VISUALIZATIONS
     print("\n[5/6] Generating Visualizations...")
     result_prefix = f'results/{category.lower()}'
     classifier.plot_confusion_matrix(save_path=f'{result_prefix}_confusion_matrix.png')
     classifier.plot_roc_curve(X_test, y_test, save_path=f'{result_prefix}_roc_curve.png')
     importance_df = classifier.plot_feature_importance(top_n=20, save_path=f'{result_prefix}_feature_importance.png')
     
-    # SHAP explanations (for hackathon judges - shows model interpretability!)
     print("  Generating SHAP explanations (model interpretability)...")
     classifier.plot_shap_explanations(X_test, y_test, top_n=15, 
                                      save_path=f'{result_prefix}_shap_explanations.png')
     
-    # Backtesting
     print("  Running backtest on historical data...")
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
@@ -299,12 +259,10 @@ def main(category='SDG_CLEAN_ENERGY', custom_tickers=None, use_significant_moves
     print("\nTop 10 Most Important Features:")
     print(importance_df.head(10).to_string(index=False))
     
-    # 6. NEXT-DAY PREDICTION
     print("\n[6/6] Making Next-Day Prediction...")
     exclude_cols = ['target', 'future_close'] + (['return'] if use_significant_moves else [])
     latest_features = combined_df.drop(columns=[col for col in exclude_cols if col in combined_df.columns]).iloc[[-1]]
     
-    # Get current price for price estimation
     try:
         import yfinance as yf
         stock = yf.Ticker(primary_ticker)
@@ -323,11 +281,9 @@ def main(category='SDG_CLEAN_ENERGY', custom_tickers=None, use_significant_moves
     print(f"P(DOWN):             {next_day_pred['probability_down']:.2%}")
     print(f"P(UP):               {next_day_pred['probability_up']:.2%}")
     
-    # Save model
     model_file = f'models/{category.lower()}_xgboost_model.json'
     classifier.save_model(model_file)
     
-    # Save metrics to file
     metrics_file = f'results/{category.lower()}_metrics.txt'
     with open(metrics_file, 'w') as f:
         f.write(f"MARKET MOVEMENT CLASSIFIER - {loader.description}\n")
@@ -375,23 +331,9 @@ def main(category='SDG_CLEAN_ENERGY', custom_tickers=None, use_significant_moves
 
 
 def train_and_predict(tickers, category='CUSTOM', use_significant_moves=False, train_per_ticker=True):
-    """
-    Clean function to train model and get predictions for API use
-    
-    Args:
-        tickers: List of ticker symbols
-        category: Category name (default 'CUSTOM')
-        use_significant_moves: If True, predict only significant moves (>2%)
-        train_per_ticker: If True, train separate model for each ticker
-    
-    Returns:
-        Dictionary with model results and predictions for each ticker, or None if failed
-    """
     if train_per_ticker and len(tickers) > 1:
-        # Train separate model for each ticker
         print(f"Training separate models for {len(tickers)} tickers...")
         
-        # Download market data once for all tickers
         market_data = None
         try:
             import yfinance as yf
@@ -414,19 +356,16 @@ def train_and_predict(tickers, category='CUSTOM', use_significant_moves=False, t
         if not results:
             return None
         
-        # Return format compatible with API
         return {
             'results': results,
             'tickers': list(results.keys()),
             'train_per_ticker': True
         }
     else:
-        # Use original multi-ticker combined approach
         return main(category=category, custom_tickers=tickers, use_significant_moves=use_significant_moves)
 
 
 def run_multiple_categories(categories=None):
-    """Run analysis on multiple categories"""
     if categories is None:
         categories = ['SDG_CLEAN_ENERGY', 'TECH', 'FINANCE']
     
@@ -449,7 +388,6 @@ def run_multiple_categories(categories=None):
             print(f"\n❌ Failed for {category}: {e}")
             continue
     
-    # Summary comparison
     if results:
         print("\n\n" + "="*70)
         print("CATEGORY COMPARISON SUMMARY")
