@@ -199,6 +199,35 @@ python3 app.py
 
 ---
 
+### Option 1B: Docker Deployment (Separate Frontend & Backend)
+
+Two lightweight Dockerfiles are provided so the ML API and the UI can be managed independently.  
+See `Dockerfile.backend`, `Dockerfile.frontend`, and `docker-compose.yml`.
+
+```bash
+# Build both containers
+docker compose build
+
+# Run both services; Ctrl+C to stop
+docker compose up
+```
+
+You can also run the services individually:
+
+```bash
+# Backend only
+docker build -f Dockerfile.backend -t market-classifier-backend .
+docker run -p 5000:5000 market-classifier-backend
+
+# Frontend only (expects backend mapped locally on :5000)
+docker build -f Dockerfile.frontend -t market-classifier-frontend .
+docker run -p 8080:8080 market-classifier-frontend
+```
+
+> The browser code calls `http://localhost:5000/api/...`, so make sure the backend container is published on that host port when running the frontend.
+
+---
+
 ### Option 2: Standalone ML Pipeline (CLI)
 
 #### Run Single Category
